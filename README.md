@@ -8,12 +8,17 @@ Runs on MacOS and Windows.
 ## Building From Source
 
 Needs Rust toolchain [rustup.rs](https://rustup.rs)
-Run this to build
+
+**Windows**
 `cargo build --release`
-Files appear at
-`.\target\release\lan-audio-share\lan-audio-share.exe`
-or
-`./target/release/lan-audio-share/lan-audio-share.app`
+Appears at `.\target\release\lan-audio-share.exe`
+
+**macOS**
+`bash scripts/make-macos-app.sh`
+Appears at `./target/release/LAN Audio Share.app` — double-click it or drag it to /Applications.
+Add `--universal` to also run on Intel Macs.
+
+Allow the Local Network and Microphone prompts on first launch. Without them the app can't find peers or capture audio.
 
 Use along with [Loopback](https://rogueamoeba.com/loopback/) or [Virtual Audio Cable](https://vac.muzychenko.net/en/download.htm) to share desktop audio.
 
