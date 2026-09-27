@@ -2,6 +2,8 @@
 
 # LAN Audio Share
 
+![alt text](https://raw.githubusercontent.com/SlopHobbyist/thumbnails/main/lan-audio-share.png "Example Screenshot | UI sending audio on Windows 10")
+
 Streams audio between two computers across a LAN.
 Runs on MacOS and Windows.
 
@@ -23,6 +25,8 @@ Allow the Local Network and Microphone prompts on first launch. Without them the
 Use along with [Loopback](https://rogueamoeba.com/loopback/) or [Virtual Audio Cable](https://vac.muzychenko.net/en/download.htm) to share desktop audio.
 
 Inspired by [SonoBus](https://github.com/sonosaurus/sonobus), but doesn't need a central server.
+
+I made the icons myself in Adobe Illustrator.
 
 ## License
 This repository and all contained code is licensed under GNU GPLv3. See .\LICENSE.txt for more info.
