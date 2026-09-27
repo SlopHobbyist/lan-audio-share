@@ -1,0 +1,9 @@
+Let's create a program that lets computers share audio with one another across a LAN. It needs to work cross-platform.
+
+While I love SonoBus, I need something that just works as soon as I launch it, without having to unmute the tracks every time or call back to a server.
+
+The UI should be a single window that lets users select SEND or RECEIVE audio, and which audio device to SEND or LISTEN on. On startup, should default and immediately resume what settings it had before.
+
+I will mainly be using this to send audio from my arm macbook to my pc over lan. We don't need to deal with audio capture stuff, as I already use "Loopback Audio" on mac, so we can grab desktop audio from there.
+
+SonoBus had minimal delay and great sound quality, we can reuse stuff from that.
