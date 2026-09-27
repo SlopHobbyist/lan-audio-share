@@ -7,3 +7,5 @@ The UI should be a single window that lets users select SEND or RECEIVE audio, a
 I will mainly be using this to send audio from my arm macbook to my pc over lan. We don't need to deal with audio capture stuff, as I already use "Loopback Audio" on mac, so we can grab desktop audio from there.
 
 SonoBus had minimal delay and great sound quality, we can reuse stuff from that.
+
+Default to 48khz 2048 samples

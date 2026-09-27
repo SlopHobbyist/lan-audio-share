@@ -108,3 +108,8 @@ venv.bak/
 htmlcov/
 *.cover
 .cache
+
+
+# Added by cargo
+
+/target
