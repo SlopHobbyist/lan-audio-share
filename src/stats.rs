@@ -54,6 +54,9 @@ pub struct Stats {
     pub peers: Mutex<Vec<Peer>>,
     /// Name the far end reports, for display.
     pub remote_name: Mutex<String>,
+    /// When a sender last announced itself to us, so the UI can tell "no sender
+    /// on the network" apart from "a sender is there but its audio is not".
+    remote_seen_at: Mutex<Option<Instant>>,
     /// Last error worth showing the user.
     pub error: Mutex<Option<String>>,
     /// Set by a cpal error callback to ask the UI thread to rebuild the stream.
@@ -86,6 +89,7 @@ impl Stats {
             last_audio_at: Mutex::new(None),
             peers: Mutex::new(Vec::new()),
             remote_name: Mutex::new(String::new()),
+            remote_seen_at: Mutex::new(None),
             error: Mutex::new(None),
             restart_requested: AtomicBool::new(false),
             volume: AtomicU32::new(1.0f32.to_bits()),
@@ -114,6 +118,9 @@ impl Stats {
         }
         if let Ok(mut g) = self.remote_name.lock() {
             g.clear();
+        }
+        if let Ok(mut g) = self.remote_seen_at.lock() {
+            *g = None;
         }
         if let Ok(mut g) = self.error.lock() {
             *g = None;
@@ -195,5 +202,30 @@ impl Stats {
             .lock()
             .map(|g| g.clone())
             .unwrap_or_default()
+    }
+
+    /// Record a sender's announcement.
+    pub fn note_remote(&self, name: &str) {
+        if let Ok(mut g) = self.remote_seen_at.lock() {
+            *g = Some(Instant::now());
+        }
+        if !name.is_empty()
+            && let Ok(mut g) = self.remote_name.lock()
+            && *g != name
+        {
+            *g = name.to_string();
+        }
+    }
+
+    /// The sender currently announcing itself on the network, if any.
+    pub fn announced_remote(&self) -> Option<String> {
+        let timeout = Duration::from_millis(crate::protocol::PEER_TIMEOUT_MS);
+        let recent = self
+            .remote_seen_at
+            .lock()
+            .ok()
+            .and_then(|g| *g)
+            .is_some_and(|t| t.elapsed() < timeout);
+        recent.then(|| self.remote())
     }
 }

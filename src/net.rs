@@ -6,9 +6,21 @@
 //! link comes back on its own within a beacon interval.
 //!
 //! Beacons go out over both multicast and subnet broadcast, because networks
-//! that quietly drop one often pass the other. If both are blocked (or the two
-//! machines are on different subnets), the manual peer list in the settings is
-//! the escape hatch.
+//! that quietly drop one often pass the other. They are sent separately on
+//! every interface: a machine with VirtualBox, Hyper-V, WSL or a VPN installed
+//! routes a plain 255.255.255.255 broadcast (and an unpinned multicast) out of
+//! whichever adapter has the lowest metric, which is frequently a virtual one
+//! that goes nowhere.
+//!
+//! Each side also answers the other's beacon with a unicast reply, so discovery
+//! works as long as a broadcast gets through in either direction. If both are
+//! blocked (or the two machines are on different subnets), the manual peer list
+//! in the settings is the escape hatch.
+//!
+//! Firewalls: a receiver sends its beacons from the audio socket itself. Windows
+//! Firewall admits unicast replies to a port that recently sent a broadcast or
+//! multicast, even with no inbound rule, and a beacon goes out every 500 ms, so
+//! that exemption stays open for as long as the receiver is running.
 
 use crate::config::Config;
 use crate::protocol::{
@@ -17,7 +29,7 @@ use crate::protocol::{
 };
 use crate::stats::{Peer, Stats};
 use anyhow::{Context, Result};
-use socket2::{Domain, Protocol, Socket, Type};
+use socket2::{Domain, Protocol, SockRef, Socket, Type};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -38,6 +50,115 @@ fn mcast_addr() -> SocketAddrV4 {
     SocketAddrV4::new(Ipv4Addr::from(MCAST_GROUP), DISCOVERY_PORT)
 }
 
+/// How often the interface list is re-read, so a cable plugged in or a Wi-Fi
+/// network joined after launch starts carrying beacons without a restart.
+const INTERFACE_REFRESH: Duration = Duration::from_secs(5);
+
+/// A peer heard at a new address under a name and port we already know is taken
+/// to be the same machine on another interface, unless the old address has gone
+/// quiet for this long (the machine's IP changed).
+const ADDRESS_SWITCH_AFTER: Duration = Duration::from_millis(BEACON_INTERVAL_MS * 4);
+
+/// One IPv4 interface to announce on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct LanInterface {
+    ip: Ipv4Addr,
+    broadcast: Ipv4Addr,
+}
+
+/// Every up, non-loopback IPv4 interface.
+fn lan_interfaces() -> Vec<LanInterface> {
+    let Ok(interfaces) = if_addrs::get_if_addrs() else {
+        return Vec::new();
+    };
+    let mut out: Vec<LanInterface> = interfaces
+        .iter()
+        .filter(|i| !i.is_loopback() && i.is_oper_up())
+        .filter_map(|i| match &i.addr {
+            if_addrs::IfAddr::V4(v4) => Some(LanInterface {
+                ip: v4.ip,
+                // Windows does not report a broadcast address, so derive it.
+                broadcast: v4
+                    .broadcast
+                    .unwrap_or_else(|| Ipv4Addr::from(u32::from(v4.ip) | !u32::from(v4.netmask))),
+            }),
+            _ => None,
+        })
+        .collect();
+    out.dedup();
+    out
+}
+
+/// Tracks the machine's interfaces and sends beacons out of each one.
+struct Announcer {
+    interfaces: Vec<LanInterface>,
+    refreshed: Instant,
+}
+
+impl Announcer {
+    fn new() -> Self {
+        Self {
+            interfaces: lan_interfaces(),
+            refreshed: Instant::now(),
+        }
+    }
+
+    /// Re-read the interface list if it is due, joining the discovery group on
+    /// any new interface when given the socket that listens for beacons.
+    fn refresh(&mut self, listener: Option<&UdpSocket>) {
+        if self.refreshed.elapsed() < INTERFACE_REFRESH {
+            return;
+        }
+        self.refreshed = Instant::now();
+        self.interfaces = lan_interfaces();
+        if let Some(socket) = listener {
+            join_group(socket, &self.interfaces);
+        }
+    }
+
+    /// Multicast and subnet-broadcast `beacon` on every interface.
+    fn announce(&self, socket: &UdpSocket, beacon: &Beacon) {
+        let bytes = beacon.encode();
+        let sock = SockRef::from(socket);
+        for iface in &self.interfaces {
+            if sock.set_multicast_if_v4(&iface.ip).is_ok() {
+                let _ = socket.send_to(&bytes, mcast_addr());
+            }
+            // A directed broadcast is routed out of the interface that owns the
+            // subnet, unlike 255.255.255.255.
+            let _ = socket.send_to(&bytes, SocketAddr::from((iface.broadcast, DISCOVERY_PORT)));
+        }
+        // Still worth one limited broadcast for networks where the subnet mask
+        // reported by the OS is wrong, or when no interfaces could be listed.
+        let _ = socket.send_to(
+            &bytes,
+            SocketAddr::from((Ipv4Addr::BROADCAST, DISCOVERY_PORT)),
+        );
+    }
+}
+
+/// Join the discovery multicast group on each interface. Joining on the
+/// unspecified address alone picks a single adapter, which on a machine with
+/// virtual adapters is often the wrong one.
+fn join_group(socket: &UdpSocket, interfaces: &[LanInterface]) {
+    let group = Ipv4Addr::from(MCAST_GROUP);
+    // Errors are expected: most interfaces will already be joined on refresh.
+    let _ = socket.join_multicast_v4(&group, &Ipv4Addr::UNSPECIFIED);
+    for iface in interfaces {
+        let _ = socket.join_multicast_v4(&group, &iface.ip);
+    }
+}
+
+/// Settings every beacon-sending socket needs.
+fn prepare_for_beacons(socket: &UdpSocket) -> Result<()> {
+    socket.set_broadcast(true)?;
+    socket.set_multicast_ttl_v4(1)?;
+    // Loop multicast back locally so a sender and receiver on one machine can
+    // still find each other, which is how this gets tested.
+    socket.set_multicast_loop_v4(true)?;
+    Ok(())
+}
+
 /// Open the shared discovery socket: bound to the well-known port, joined to the
 /// multicast group, and able to send broadcasts.
 ///
@@ -51,29 +172,26 @@ pub fn discovery_socket() -> Result<UdpSocket> {
     socket
         .bind(&bind.into())
         .with_context(|| format!("could not bind discovery port {DISCOVERY_PORT}"))?;
-    socket.set_broadcast(true)?;
-    socket.set_multicast_ttl_v4(1)?;
-    // Loop multicast back locally so a sender and receiver on one machine can
-    // still find each other, which is how this gets tested.
-    socket.set_multicast_loop_v4(true)?;
-    // Joining on the unspecified interface lets the OS pick the default route.
-    socket
-        .join_multicast_v4(&Ipv4Addr::from(MCAST_GROUP), &Ipv4Addr::UNSPECIFIED)
-        .ok();
+    let socket: UdpSocket = socket.into();
+    prepare_for_beacons(&socket)?;
+    join_group(&socket, &lan_interfaces());
     socket.set_read_timeout(Some(Duration::from_millis(250)))?;
-    Ok(socket.into())
+    Ok(socket)
 }
 
-/// Open the socket a receiver listens for audio on.
+/// Open the socket a receiver listens for audio on. It also sends the
+/// receiver's beacons (see the module notes on firewalls).
 ///
 /// Falls back to an ephemeral port if the configured one is taken, since the
 /// beacon advertises whichever port we actually got.
 pub fn audio_socket(preferred_port: u16) -> Result<UdpSocket> {
-    match UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], preferred_port))) {
-        Ok(socket) => Ok(socket),
+    let socket = match UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], preferred_port))) {
+        Ok(socket) => socket,
         Err(_) => UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], 0)))
-            .context("could not bind any audio port"),
-    }
+            .context("could not bind any audio port")?,
+    };
+    prepare_for_beacons(&socket)?;
+    Ok(socket)
 }
 
 /// Socket a sender transmits from.
@@ -82,16 +200,6 @@ pub fn sender_socket() -> Result<UdpSocket> {
         .context("could not open sending socket")?;
     socket.set_broadcast(true).ok();
     Ok(socket)
-}
-
-fn send_beacon(socket: &UdpSocket, beacon: &Beacon) {
-    let bytes = beacon.encode();
-    let _ = socket.send_to(&bytes, mcast_addr());
-    // Broadcast as well: some networks pass one and not the other.
-    let _ = socket.send_to(
-        &bytes,
-        SocketAddr::from((Ipv4Addr::BROADCAST, DISCOVERY_PORT)),
-    );
 }
 
 /// Handle for the background threads belonging to one active role. Dropping it
@@ -142,7 +250,8 @@ pub fn spawn_stoppable(
 }
 
 /// Run a sender's discovery: collect receiver beacons into the peer list and
-/// announce ourselves so the receiver can display our name.
+/// announce ourselves, which both names us in the receiver's UI and prompts
+/// receivers to answer directly.
 pub fn spawn_sender_discovery(
     stats: Arc<Stats>,
     targets: PeerTargets,
@@ -168,6 +277,7 @@ pub fn spawn_sender_discovery(
                 name: name.clone(),
             };
             let timeout = Duration::from_millis(PEER_TIMEOUT_MS);
+            let mut announcer = Announcer::new();
             let mut last_announce = Instant::now() - Duration::from_secs(1);
             let mut buf = [0u8; 512];
 
@@ -190,7 +300,8 @@ pub fn spawn_sender_discovery(
 
             while !stop.load(Ordering::Relaxed) {
                 if last_announce.elapsed() >= Duration::from_millis(BEACON_INTERVAL_MS) {
-                    send_beacon(&socket, &announce);
+                    announcer.refresh(Some(&socket));
+                    announcer.announce(&socket, &announce);
                     last_announce = Instant::now();
                     // Expiring peers on the same tick keeps the list honest when
                     // a receiver disappears without saying goodbye.
@@ -239,14 +350,31 @@ fn note_peer(stats: &Stats, addr: SocketAddr, name: &str) {
             if !name.is_empty() {
                 existing.name = name.to_string();
             }
-        } else {
-            guard.push(Peer {
-                addr,
-                name: name.to_string(),
-                last_seen: Instant::now(),
-                manual: false,
-            });
+            return;
         }
+
+        // The same receiver heard on a second interface (a machine talking to
+        // itself over several adapters, typically). Streaming to both would
+        // just deliver every packet twice, so stick with the address already in
+        // use for as long as it keeps answering.
+        if !name.is_empty()
+            && let Some(existing) = guard
+                .iter_mut()
+                .find(|p| !p.manual && p.name == name && p.addr.port() == addr.port())
+        {
+            if existing.last_seen.elapsed() >= ADDRESS_SWITCH_AFTER {
+                existing.addr = addr;
+                existing.last_seen = Instant::now();
+            }
+            return;
+        }
+
+        guard.push(Peer {
+            addr,
+            name: name.to_string(),
+            last_seen: Instant::now(),
+            manual: false,
+        });
     }
 }
 
@@ -268,15 +396,25 @@ fn publish(stats: &Stats, targets: &PeerTargets, timeout: Duration) {
     }
 }
 
-/// Run a receiver's discovery: announce ourselves regularly and pick up the
-/// sender's name for display.
+/// Run a receiver's discovery: announce ourselves regularly, answer senders
+/// directly, and pick up the sender's name for display.
+///
+/// `audio` is (a clone of) the socket audio arrives on. Beacons are sent from it
+/// so that replies to them — the audio — are let through a firewall that has no
+/// inbound rule for this app.
 pub fn spawn_receiver_beacon(
     stats: Arc<Stats>,
-    audio_port: u16,
+    audio: UdpSocket,
     sample_rate: u32,
     channels: u8,
 ) -> Result<NetThreads> {
-    let socket = discovery_socket()?;
+    let audio_port = audio
+        .local_addr()
+        .context("audio socket has no local address")?
+        .port();
+    // Bound only to hear senders. If another instance on this machine holds the
+    // port without address reuse, the receiver still works on its own beacons.
+    let listener = discovery_socket().ok();
     let stop = Arc::new(AtomicBool::new(false));
     let mut threads = NetThreads::new(stop.clone());
     let name = local_name();
@@ -291,32 +429,42 @@ pub fn spawn_receiver_beacon(
                 channels,
                 name,
             };
+            let mut announcer = Announcer::new();
             let mut last_beacon = Instant::now() - Duration::from_secs(1);
             let mut buf = [0u8; 512];
 
             while !stop.load(Ordering::Relaxed) {
                 if last_beacon.elapsed() >= Duration::from_millis(BEACON_INTERVAL_MS) {
-                    send_beacon(&socket, &hello);
+                    announcer.refresh(listener.as_ref());
+                    announcer.announce(&audio, &hello);
                     last_beacon = Instant::now();
                 }
 
-                let Ok((len, _from)) = socket.recv_from(&mut buf) else {
+                let Some(listener) = listener.as_ref() else {
+                    std::thread::sleep(Duration::from_millis(100));
                     continue;
                 };
-                if let Some(beacon) = Beacon::parse(&buf[..len])
-                    && beacon.kind == PT_SENDER
-                    && !beacon.name.is_empty()
-                    && let Ok(mut guard) = stats.remote_name.lock()
-                    && *guard != beacon.name
-                {
-                    *guard = beacon.name;
+                let Ok((len, from)) = listener.recv_from(&mut buf) else {
+                    continue;
+                };
+                let Some(beacon) = Beacon::parse(&buf[..len]) else {
+                    continue;
+                };
+                if beacon.kind != PT_SENDER {
+                    continue;
                 }
+
+                // Answer the sender directly. This is what gets us found when our
+                // broadcasts do not reach it but its broadcasts do reach us.
+                let _ = audio.send_to(&hello.encode(), from);
+
+                stats.note_remote(&beacon.name);
             }
 
             // Tell any sender we are going away so it stops immediately rather
             // than waiting for us to time out.
             hello.kind = PT_BYE;
-            send_beacon(&socket, &hello);
+            announcer.announce(&audio, &hello);
         })
         .context("could not start beacon thread")?;
     threads.push(handle);
@@ -341,8 +489,15 @@ mod tests {
         let sender_stats = Arc::new(Stats::new());
         let targets = new_peer_targets();
 
-        let listen_port = 47_999u16;
-        let _receiver = match spawn_receiver_beacon(receiver_stats, listen_port, 48_000, 2) {
+        let audio = match audio_socket(47_999) {
+            Ok(socket) => socket,
+            Err(err) => {
+                eprintln!("skipping: could not open an audio socket ({err})");
+                return;
+            }
+        };
+        let listen_port = audio.local_addr().unwrap().port();
+        let _receiver = match spawn_receiver_beacon(receiver_stats.clone(), audio, 48_000, 2) {
             Ok(handle) => handle,
             Err(err) => {
                 eprintln!("skipping: could not open a discovery socket ({err})");
@@ -377,11 +532,30 @@ mod tests {
             "sender never discovered the receiver; targets were {found:?}"
         );
 
-        // And the receiver should have learned the sender is out there.
+        // A receiver reachable over several adapters must still be one target.
+        assert_eq!(
+            found.iter().filter(|a| a.port() == listen_port).count(),
+            1,
+            "the same receiver was added more than once: {found:?}"
+        );
+
         let peers = sender_stats.live_peers();
         assert!(
             peers.iter().any(|p| p.addr.port() == listen_port),
             "peer table did not record the receiver"
         );
+    }
+
+    /// Every interface must get a broadcast address inside its own subnet,
+    /// since that is what routes a beacon out of the right adapter.
+    #[test]
+    fn interfaces_have_sensible_broadcast_addresses() {
+        for iface in lan_interfaces() {
+            println!("{} -> {}", iface.ip, iface.broadcast);
+            assert_ne!(iface.broadcast, Ipv4Addr::UNSPECIFIED);
+            let ip = u32::from(iface.ip);
+            let bcast = u32::from(iface.broadcast);
+            assert!(bcast >= ip, "{} is below {}", iface.broadcast, iface.ip);
+        }
     }
 }

@@ -222,6 +222,21 @@ impl App {
                         format!("Playing audio from {who}"),
                         egui::Color32::from_rgb(90, 190, 120),
                     )
+                } else if let Some(sender) = stats.announced_remote() {
+                    // Discovery works but audio does not: that narrows it down to
+                    // the sender's input or a firewall on this machine.
+                    let who = if sender.is_empty() {
+                        "A sender".to_string()
+                    } else {
+                        sender
+                    };
+                    (
+                        "○",
+                        format!(
+                            "{who} is on the network, but no audio is arriving.                              Check it has a listener, and that this app is allowed                              through the firewall here."
+                        ),
+                        egui::Color32::from_rgb(220, 140, 60),
+                    )
                 } else {
                     (
                         "○",
@@ -251,6 +266,19 @@ impl App {
                     "silent".to_string()
                 }),
         );
+
+        // A silent input streams perfectly and plays nothing, which looks
+        // exactly like a network fault from the other end.
+        if self.config.mode == Mode::Send && peak <= 0.0001 {
+            ui.label(
+                egui::RichText::new(
+                    "The input is silent. Check audio is actually playing into this \
+                     device (and, on macOS, that Microphone access is allowed).",
+                )
+                .color(egui::Color32::from_rgb(220, 140, 60))
+                .size(11.0),
+            );
+        }
 
         ui.add_space(6.0);
 

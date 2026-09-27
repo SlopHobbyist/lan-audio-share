@@ -216,10 +216,13 @@ pub fn start(config: &Config, stats: Arc<Stats>) -> Result<RecvRole> {
     let capacity = rate as usize * BUF_CHANNELS * BUFFER_SECONDS;
     let (producer, consumer) = HeapRb::<f32>::new(capacity).split();
 
+    let beacon_socket = socket
+        .try_clone()
+        .context("could not share the audio socket")?;
     let rx = spawn_receive_thread(socket, producer, stats.clone())?;
     let beacon = net::spawn_receiver_beacon(
         stats.clone(),
-        audio_port,
+        beacon_socket,
         config.sample_rate,
         config.channels() as u8,
     )?;
