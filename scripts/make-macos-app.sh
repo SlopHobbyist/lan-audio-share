@@ -74,7 +74,7 @@ if [[ -f assets/AppIcon.icns ]]; then
   cp assets/AppIcon.icns "${RESOURCES}/AppIcon.icns"
 else
   echo "    warning: assets/AppIcon.icns missing, the app will show a blank icon"
-  echo "             (regenerate it with: python3 tools/make_icon.py)"
+  echo "             (regenerate it with: python3 tools/make_icons.py)"
 fi
 
 # The two usage descriptions are load-bearing, not boilerplate. macOS refuses
