@@ -47,6 +47,21 @@ for arg in "$@"; do
   esac
 done
 
+# Fail on an old toolchain here, with the fix spelled out, rather than letting
+# it surface as a wall of unmet dependency requirements partway through a build.
+REQUIRED_RUSTC="$(sed -n 's/^rust-version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)"
+if [[ -n "$REQUIRED_RUSTC" ]] && command -v rustc >/dev/null; then
+  HAVE_RUSTC="$(rustc --version | awk '{print $2}')"
+  if ! awk -v have="$HAVE_RUSTC" -v need="$REQUIRED_RUSTC" 'BEGIN {
+        split(have, h, /[.+-]/); split(need, n, ".");
+        exit (h[1] > n[1] || (h[1] == n[1] && h[2] >= n[2])) ? 0 : 1
+      }'; then
+    echo "error: this project needs Rust ${REQUIRED_RUSTC} or newer, but rustc is ${HAVE_RUSTC}." >&2
+    echo "       run:  rustup update" >&2
+    exit 1
+  fi
+fi
+
 # Version comes from Cargo.toml so the bundle never disagrees with the binary.
 VERSION="$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)"
 VERSION="${VERSION:-0.1.0}"
@@ -59,21 +74,25 @@ RESOURCES="${CONTENTS}/Resources"
 echo "==> Building ${APP_NAME} ${VERSION}"
 
 build_both_arches() {
-  rustup target add x86_64-apple-darwin aarch64-apple-darwin >/dev/null 2>&1 || return 1
+  # Never swallow the reason this fails: the message is the whole point when
+  # something goes wrong, and guessing at a cause here actively misleads.
+  if ! rustup target add x86_64-apple-darwin aarch64-apple-darwin 2>&1 |
+    sed 's/^/    /'; then
+    return 1
+  fi
   cargo build --release --target x86_64-apple-darwin || return 1
   cargo build --release --target aarch64-apple-darwin || return 1
 }
 
 if [[ "$UNIVERSAL" == "1" ]]; then
   echo "--> Building for Apple Silicon and Intel (this takes about twice as long)"
-  # Adding a target needs rustup and a network on first use. That should cost
-  # the second architecture, not the whole build, so fall back rather than fail.
+  # Cross-compiling should cost the second architecture, not the whole build,
+  # so fall back to native rather than failing outright.
   if ! build_both_arches; then
     echo
-    echo "    warning: could not build both architectures — rustup may be offline"
-    echo "             or the darwin targets unavailable. Falling back to a build"
-    echo "             for this machine only; the app will not run on other Macs."
-    echo "             Re-run once rustup can fetch the targets for a universal build."
+    echo "    warning: could not build for both architectures (see the error above)."
+    echo "             Falling back to a build for this machine only; the app will"
+    echo "             not run on other Macs."
     echo
     UNIVERSAL=0
     cargo build --release

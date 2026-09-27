@@ -2,6 +2,9 @@
 name = "lan-audio-share"
 version = "0.1.0"
 edition = "2024"
+# Set by egui/eframe 0.35, the highest requirement in the tree. Declaring it
+# makes cargo say so up front instead of failing partway through a build.
+rust-version = "1.92"
 
 [dependencies]
 anyhow = "1.0.104"
