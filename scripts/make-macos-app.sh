@@ -2,11 +2,15 @@
 #
 # Builds "LAN Audio Share.app" — a double-clickable macOS bundle.
 #
-#   bash scripts/make-macos-app.sh              # native (Apple Silicon or Intel)
-#   bash scripts/make-macos-app.sh --universal  # one binary for both
+#   bash scripts/make-macos-app.sh           # universal: Apple Silicon + Intel
+#   bash scripts/make-macos-app.sh --native  # this machine only, builds quicker
 #
 # The bundle lands in target/release/ and can be dragged straight into
 # /Applications. Nothing but Xcode command line tools and Rust is required.
+#
+# Universal is the default so the result runs on any Mac. It compiles everything
+# twice, so it takes roughly twice as long; --native is there for quick local
+# iteration. Either way the finished architectures are printed at the end.
 #
 # A bundle is not just cosmetic here. macOS grants Microphone and Local Network
 # access per app identity, and a bare binary has none — it inherits whatever the
@@ -28,11 +32,17 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 1
 fi
 
-UNIVERSAL=0
+UNIVERSAL=1
 for arg in "$@"; do
   case "$arg" in
+    --native) UNIVERSAL=0 ;;
+    # Accepted so older invocations and docs keep working; it is now the default.
     --universal) UNIVERSAL=1 ;;
-    -h|--help) sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)
+      # Print the comment header, however long it happens to be.
+      awk 'NR>1 && /^#/ { sub(/^# ?/, ""); print; next } NR>1 { exit }' "${BASH_SOURCE[0]}"
+      exit 0
+      ;;
     *) echo "error: unknown option '$arg'" >&2; exit 1 ;;
   esac
 done
@@ -48,12 +58,28 @@ RESOURCES="${CONTENTS}/Resources"
 
 echo "==> Building ${APP_NAME} ${VERSION}"
 
+build_both_arches() {
+  rustup target add x86_64-apple-darwin aarch64-apple-darwin >/dev/null 2>&1 || return 1
+  cargo build --release --target x86_64-apple-darwin || return 1
+  cargo build --release --target aarch64-apple-darwin || return 1
+}
+
 if [[ "$UNIVERSAL" == "1" ]]; then
-  echo "--> Building for both architectures"
-  rustup target add x86_64-apple-darwin aarch64-apple-darwin >/dev/null
-  cargo build --release --target x86_64-apple-darwin
-  cargo build --release --target aarch64-apple-darwin
+  echo "--> Building for Apple Silicon and Intel (this takes about twice as long)"
+  # Adding a target needs rustup and a network on first use. That should cost
+  # the second architecture, not the whole build, so fall back rather than fail.
+  if ! build_both_arches; then
+    echo
+    echo "    warning: could not build both architectures — rustup may be offline"
+    echo "             or the darwin targets unavailable. Falling back to a build"
+    echo "             for this machine only; the app will not run on other Macs."
+    echo "             Re-run once rustup can fetch the targets for a universal build."
+    echo
+    UNIVERSAL=0
+    cargo build --release
+  fi
 else
+  echo "--> Building for this machine only"
   cargo build --release
 fi
 
@@ -135,9 +161,8 @@ touch "$APP"  # nudge Finder into picking up the new icon
 
 echo
 echo "Built: ${APP}"
-if [[ "$UNIVERSAL" == "1" ]]; then
-  echo "Architectures: $(lipo -archs "${MACOS_DIR}/${BIN_NAME}")"
-fi
+# Always stated, so there is never any doubt about what actually got produced.
+echo "Architectures: $(lipo -archs "${MACOS_DIR}/${BIN_NAME}" 2>/dev/null || echo unknown)"
 echo
 echo "Double-click it, or drag it into /Applications."
 echo "On first launch macOS will ask for Local Network access — and for"

@@ -16,7 +16,7 @@ Appears at `.\target\release\lan-audio-share.exe`
 **macOS**
 `bash scripts/make-macos-app.sh`
 Appears at `./target/release/LAN Audio Share.app` — double-click it or drag it to /Applications.
-Add `--universal` to also run on Intel Macs.
+Builds universal (Apple Silicon + Intel) by default. Add `--native` for a quicker build that only runs on your own Mac.
 
 Allow the Local Network and Microphone prompts on first launch. Without them the app can't find peers or capture audio.
 
