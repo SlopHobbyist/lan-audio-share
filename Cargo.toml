@@ -27,5 +27,36 @@ opt-level = 1
 lto = "thin"
 codegen-units = 1
 
+# Media key forwarding. There is no portable way to claim or synthesise a media
+# key, so each platform gets the APIs it needs and nothing more. Every one of
+# these is already in the tree via eframe, so none of it is a new build cost.
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target."cfg(target_os = \"macos\")".dependencies]
+# Default features here would drag in most of AppKit (CloudKit, Core Data and
+# friends); only the three modules this uses are asked for.
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSEvent",
+    "NSGraphicsContext",
+    "objc2-core-graphics",
+] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CFCGTypes",
+    "CFMachPort",
+    "CFRunLoop",
+] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CGEvent",
+    "CGEventTypes",
+] }
+
 [target."cfg(windows)".build-dependencies]
 winresource = "0.1.31"

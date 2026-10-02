@@ -3,7 +3,8 @@
 //! The audio callback must never block, so everything it touches is either an
 //! atomic or behind a lock the callback only ever tries (never waits on).
 
-use std::net::SocketAddr;
+use crate::protocol::MediaKey;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -57,6 +58,19 @@ pub struct Stats {
     /// When a sender last announced itself to us, so the UI can tell "no sender
     /// on the network" apart from "a sender is there but its audio is not".
     remote_seen_at: Mutex<Option<Instant>>,
+    /// Where that sender's announcement came from, which is also where a media
+    /// key has to be sent for it to arrive.
+    remote_addr: Mutex<Option<SocketAddr>>,
+    /// Address audio is actually arriving from. A fallback for addressing the
+    /// sender when its announcements are not reaching us but its audio is.
+    audio_source: Mutex<Option<IpAddr>>,
+    /// Media keys forwarded (on a receiver) or pressed (on a sender), and the
+    /// last one, so the UI can show the feature working.
+    pub media_keys: AtomicU64,
+    media_last: Mutex<Option<&'static str>>,
+    /// Anything the user needs to know about media key forwarding. Separate from
+    /// `error` because it must never disturb the audio, which keeps working.
+    media_note: Mutex<Option<String>>,
     /// Last error worth showing the user.
     pub error: Mutex<Option<String>>,
     /// Set by a cpal error callback to ask the UI thread to rebuild the stream.
@@ -90,6 +104,11 @@ impl Stats {
             peers: Mutex::new(Vec::new()),
             remote_name: Mutex::new(String::new()),
             remote_seen_at: Mutex::new(None),
+            remote_addr: Mutex::new(None),
+            audio_source: Mutex::new(None),
+            media_keys: AtomicU64::new(0),
+            media_last: Mutex::new(None),
+            media_note: Mutex::new(None),
             error: Mutex::new(None),
             restart_requested: AtomicBool::new(false),
             volume: AtomicU32::new(1.0f32.to_bits()),
@@ -120,6 +139,19 @@ impl Stats {
             g.clear();
         }
         if let Ok(mut g) = self.remote_seen_at.lock() {
+            *g = None;
+        }
+        if let Ok(mut g) = self.remote_addr.lock() {
+            *g = None;
+        }
+        if let Ok(mut g) = self.audio_source.lock() {
+            *g = None;
+        }
+        self.media_keys.store(0, Ordering::Relaxed);
+        if let Ok(mut g) = self.media_last.lock() {
+            *g = None;
+        }
+        if let Ok(mut g) = self.media_note.lock() {
             *g = None;
         }
         if let Ok(mut g) = self.error.lock() {
@@ -204,10 +236,13 @@ impl Stats {
             .unwrap_or_default()
     }
 
-    /// Record a sender's announcement.
-    pub fn note_remote(&self, name: &str) {
+    /// Record a sender's announcement, and where it came from.
+    pub fn note_remote(&self, name: &str, addr: SocketAddr) {
         if let Ok(mut g) = self.remote_seen_at.lock() {
             *g = Some(Instant::now());
+        }
+        if let Ok(mut g) = self.remote_addr.lock() {
+            *g = Some(addr);
         }
         if !name.is_empty()
             && let Ok(mut g) = self.remote_name.lock()
@@ -227,5 +262,113 @@ impl Stats {
             .and_then(|g| *g)
             .is_some_and(|t| t.elapsed() < timeout);
         recent.then(|| self.remote())
+    }
+
+    /// Note the address audio is arriving from.
+    pub fn note_audio_source(&self, ip: IpAddr) {
+        if let Ok(mut g) = self.audio_source.lock() {
+            *g = Some(ip);
+        }
+    }
+
+    /// Where to send a control message so that it reaches the machine doing the
+    /// sending.
+    ///
+    /// The address its announcements come from is the exact answer. Failing that
+    /// — networks exist where beacons get through in one direction only — the
+    /// address its audio comes from, paired with the well-known discovery port it
+    /// is always listening on, gets there too.
+    pub fn sender_control_addr(&self) -> Option<SocketAddr> {
+        if self.announced_remote().is_some()
+            && let Some(addr) = self.remote_addr.lock().ok().and_then(|g| *g)
+        {
+            return Some(addr);
+        }
+        if !self.audio_flowing() {
+            return None;
+        }
+        let ip = self.audio_source.lock().ok().and_then(|g| *g)?;
+        Some(SocketAddr::from((ip, crate::protocol::DISCOVERY_PORT)))
+    }
+
+    /// Count a media key that was forwarded or pressed.
+    pub fn note_media_key(&self, key: MediaKey) {
+        self.media_keys.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut g) = self.media_last.lock() {
+            *g = Some(key.label());
+        }
+    }
+
+    /// How many media keys have moved, and which was last, for the UI.
+    pub fn media_activity(&self) -> (u64, Option<&'static str>) {
+        (
+            self.media_keys.load(Ordering::Relaxed),
+            self.media_last.lock().ok().and_then(|g| *g),
+        )
+    }
+
+    pub fn set_media_note(&self, msg: impl Into<String>) {
+        if let Ok(mut g) = self.media_note.lock() {
+            *g = Some(msg.into());
+        }
+    }
+
+    pub fn media_note(&self) -> Option<String> {
+        self.media_note.lock().ok().and_then(|g| g.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::DISCOVERY_PORT;
+
+    /// A media key has nowhere to go until a sender has been heard from.
+    #[test]
+    fn no_sender_means_no_control_address() {
+        let stats = Stats::new();
+        assert_eq!(stats.sender_control_addr(), None);
+    }
+
+    /// An announcement is the exact answer: it says which port to reply on.
+    #[test]
+    fn prefers_the_address_a_sender_announced_from() {
+        let stats = Stats::new();
+        let announced = SocketAddr::from(([192, 168, 1, 5], DISCOVERY_PORT));
+        stats.note_remote("studio-mac", announced);
+        assert_eq!(stats.sender_control_addr(), Some(announced));
+    }
+
+    /// Audio arriving is enough on its own: some networks pass beacons in one
+    /// direction only, and the sender is always listening on the discovery port.
+    #[test]
+    fn falls_back_to_where_the_audio_comes_from() {
+        let stats = Stats::new();
+        stats.note_audio_source(IpAddr::from([192, 168, 1, 7]));
+        assert_eq!(
+            stats.sender_control_addr(),
+            None,
+            "a stale source address must not be used"
+        );
+
+        stats.note_audio();
+        assert_eq!(
+            stats.sender_control_addr(),
+            Some(SocketAddr::from(([192, 168, 1, 7], DISCOVERY_PORT)))
+        );
+    }
+
+    /// Restarting a role has to forget the far end, or keys would be sent to a
+    /// machine that is no longer there.
+    #[test]
+    fn reset_forgets_the_control_address() {
+        let stats = Stats::new();
+        stats.note_remote("studio-mac", SocketAddr::from(([192, 168, 1, 5], 47_771)));
+        stats.note_media_key(MediaKey::Next);
+        assert!(stats.sender_control_addr().is_some());
+
+        stats.reset();
+        assert_eq!(stats.sender_control_addr(), None);
+        assert_eq!(stats.media_activity(), (0, None));
     }
 }

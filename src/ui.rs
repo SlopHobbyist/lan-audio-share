@@ -7,6 +7,7 @@
 use crate::config::{Config, Mode};
 use crate::devices::{self, DeviceEntry, Direction};
 use crate::engine::Engine;
+use crate::media;
 use crate::protocol::WireFormat;
 use eframe::egui;
 use std::time::{Duration, Instant};
@@ -17,6 +18,28 @@ const DEVICE_REFRESH: Duration = Duration::from_secs(5);
 
 const SAMPLE_RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
 const BUFFER_SIZES: [u32; 6] = [256, 512, 1024, 2048, 4096, 8192];
+
+/// What forwarding media keys does, which depends on which end of the link this
+/// machine is.
+fn media_help(mode: Mode) -> &'static str {
+    if !media::SUPPORTED {
+        return "Not available on this platform.";
+    }
+    match mode {
+        Mode::Receive => {
+            "Play/pause, next, previous and stop are taken from this machine and \
+             pressed on the sender instead. Nothing here will see them."
+        }
+        Mode::Send => {
+            "Presses media keys sent by the machine listening to this one, as \
+             though they came from this keyboard."
+        }
+        Mode::Off => {
+            "Presses the listening machine's media keys on the sending machine \
+             instead. Has to be on at both ends."
+        }
+    }
+}
 
 pub struct App {
     config: Config,
@@ -170,6 +193,20 @@ impl App {
             ui.add_space(4.0);
         }
 
+        // Media keys failing is worth saying, but it is not an audio problem and
+        // must not read like one: the stream below is still fine.
+        if let Some(note) = stats.media_note() {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new("⌨").color(egui::Color32::from_rgb(220, 140, 60)));
+                ui.label(
+                    egui::RichText::new(note)
+                        .color(egui::Color32::from_rgb(220, 140, 60))
+                        .size(11.0),
+                );
+            });
+            ui.add_space(4.0);
+        }
+
         if self.config.mode == Mode::Off {
             ui.label(egui::RichText::new("Idle. Choose SEND or RECEIVE to start.").weak());
             return;
@@ -233,7 +270,9 @@ impl App {
                     (
                         "○",
                         format!(
-                            "{who} is on the network, but no audio is arriving.                              Check it has a listener, and that this app is allowed                              through the firewall here."
+                            "{who} is on the network, but no audio is arriving. Check \
+                             it has a listener, and that this app is allowed through \
+                             the firewall here."
                         ),
                         egui::Color32::from_rgb(220, 140, 60),
                     )
@@ -338,6 +377,22 @@ impl App {
                             crate::sender::bitrate_kbps(status.rate, self.config.format),
                             self.config.format.label()
                         ),
+                    );
+                }
+
+                if self.config.media_keys {
+                    let (count, last) = stats.media_activity();
+                    let verb = if self.config.mode == Mode::Send {
+                        "pressed here"
+                    } else {
+                        "sent"
+                    };
+                    row(
+                        "media keys",
+                        match last {
+                            Some(key) => format!("{count} {verb} · last {key}"),
+                            None => format!("none {verb} yet"),
+                        },
                     );
                 }
 
@@ -457,6 +512,20 @@ impl App {
                         }
                         ui.end_row();
                     });
+
+                ui.add_space(4.0);
+                let mut media_keys = self.config.media_keys;
+                ui.add_enabled_ui(media::SUPPORTED, |ui| {
+                    if ui.checkbox(&mut media_keys, "Forward media keys").changed() {
+                        self.config.media_keys = media_keys;
+                        restart = true;
+                    }
+                });
+                ui.label(
+                    egui::RichText::new(media_help(self.config.mode))
+                        .weak()
+                        .size(10.0),
+                );
 
                 ui.add_space(4.0);
                 ui.label(egui::RichText::new("Send directly to (optional)").size(11.0));

@@ -43,6 +43,41 @@ written to disk as you change them, so next launch skips all of the above.
 The status area tells you whether it is actually working — who it is streaming
 to or playing from, a level meter, and the buffer and drift figures.
 
+## Media keys
+
+Off by default. Turn **Forward media keys** on under *Advanced* — on **both**
+machines — and the play/pause, next, previous and stop keys on the machine you
+are listening at press themselves on the machine the audio is coming from. That
+is usually what you meant: the computer with the music on it is the one across
+the room.
+
+While it is on, the listening machine stops seeing those keys itself. One press
+should not pause two computers, and the press was meant for the other one.
+
+Volume keys are deliberately left alone. Your own volume keys belong to your own
+speakers, and the sender's system volume sits upstream of the capture device, so
+forwarding them would change the level of the stream rather than how loud it is
+in the room. Use the **Volume** slider for that.
+
+It needs no new firewall rule: the key goes to the same discovery port the two
+machines already use to find each other, from the same socket the audio arrives
+on. A sender only accepts keys from a listener it is actually streaming to, drops
+anything from its own addresses (two instances on one machine would otherwise
+bounce a single press between them forever), and refuses more than one press per
+50 ms, since each one synthesises a real keypress.
+
+Per-platform notes:
+
+- **Windows** claims the keys with `RegisterHotKey`, which hands them over
+  exclusively. If another program got there first, the status area says which key
+  it could not get, and the rest still work.
+- **macOS** needs Accessibility to *capture* — System Settings → Privacy &
+  Security → Accessibility — because the event tap also swallows the press.
+  Pressing needs no permission. There is no system-defined stop key on macOS, so
+  stop is the one key that cannot be forwarded to a Mac; next and previous arrive
+  as the fast-forward and rewind keys, which is what the keys on an Apple
+  keyboard send.
+
 ## Latency
 
 Defaults are 48 kHz with a 2048-frame buffer, which works out to roughly:
@@ -139,9 +174,11 @@ cargo test
 ```
 
 The suite covers the wire format, the resampler and drift controller, the jitter
-buffer's behaviour around startup, underruns and resyncs, and packetization. Three
-of the tests use real sockets and the machine's real audio hardware: one streams
-audio through the full receive path into the default output device, one checks
-that a sender discovers a receiver with no configuration, and one confirms a
-dropped packet is concealed at exactly the right length. They skip themselves
-with a message if no suitable device is available.
+buffer's behaviour around startup, underruns and resyncs, packetization, and who
+is allowed to press a media key here. Three of the tests use real sockets and the
+machine's real audio hardware: one streams audio through the full receive path
+into the default output device, one checks that a sender discovers a receiver with
+no configuration, and one confirms a dropped packet is concealed at exactly the
+right length. A fourth uses the real OS input APIs — it claims this machine's
+media keys, presses one, and checks the claim caught it. They skip themselves with
+a message when the device, or the key, is not available.

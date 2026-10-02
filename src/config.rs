@@ -55,6 +55,11 @@ pub struct Config {
     /// (multicast blocked, different subnet). Empty means rely on discovery.
     pub manual_peers: String,
     pub volume: f32,
+    /// Forward the media keys between the two machines. Off by default, and it
+    /// has to be on at both ends: on the receiver it takes the keys away from
+    /// this machine to send them, and on the sender it accepts keypresses from
+    /// the network, neither of which should ever happen without being asked for.
+    pub media_keys: bool,
 }
 
 impl Default for Config {
@@ -73,6 +78,7 @@ impl Default for Config {
             audio_port: DEFAULT_AUDIO_PORT,
             manual_peers: String::new(),
             volume: 1.0,
+            media_keys: false,
         }
     }
 }

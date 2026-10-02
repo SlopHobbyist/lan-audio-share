@@ -44,6 +44,7 @@ pub const PT_AUDIO: u8 = 1;
 pub const PT_HELLO: u8 = 2;
 pub const PT_SENDER: u8 = 3;
 pub const PT_BYE: u8 = 4;
+pub const PT_MEDIA: u8 = 5;
 
 /// How often a receiver re-announces itself, and how long a sender remembers a
 /// peer that has gone quiet.
@@ -197,6 +198,87 @@ impl Beacon {
     }
 }
 
+/// A transport control key, forwarded from the machine doing the listening to
+/// the machine doing the sending.
+///
+/// Volume is deliberately not here. The listener's own volume keys belong to the
+/// listener's own speakers, and the sender's system volume is upstream of the
+/// capture device, so forwarding them would both surprise the user and change
+/// the level of the stream itself.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MediaKey {
+    PlayPause,
+    Next,
+    Previous,
+    Stop,
+}
+
+/// Length of a media-key datagram: magic, version, packet type, key.
+pub const MEDIA_PACKET: usize = 7;
+
+impl MediaKey {
+    /// Every key that gets forwarded, which is also the set a capture grabs.
+    pub const ALL: [MediaKey; 4] = [
+        MediaKey::PlayPause,
+        MediaKey::Next,
+        MediaKey::Previous,
+        MediaKey::Stop,
+    ];
+
+    pub fn code(self) -> u8 {
+        match self {
+            MediaKey::PlayPause => 0,
+            MediaKey::Next => 1,
+            MediaKey::Previous => 2,
+            MediaKey::Stop => 3,
+        }
+    }
+
+    pub fn from_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(MediaKey::PlayPause),
+            1 => Some(MediaKey::Next),
+            2 => Some(MediaKey::Previous),
+            3 => Some(MediaKey::Stop),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            MediaKey::PlayPause => "play/pause",
+            MediaKey::Next => "next track",
+            MediaKey::Previous => "previous track",
+            MediaKey::Stop => "stop",
+        }
+    }
+
+    pub fn encode_packet(self) -> [u8; MEDIA_PACKET] {
+        [
+            MAGIC[0],
+            MAGIC[1],
+            MAGIC[2],
+            MAGIC[3],
+            VERSION,
+            PT_MEDIA,
+            self.code(),
+        ]
+    }
+
+    /// Parse a media-key datagram. The exact length is required, so a truncated
+    /// or padded packet is rejected rather than guessed at.
+    pub fn parse_packet(buf: &[u8]) -> Option<MediaKey> {
+        if buf.len() != MEDIA_PACKET
+            || buf[0..4] != MAGIC
+            || buf[4] != VERSION
+            || buf[5] != PT_MEDIA
+        {
+            return None;
+        }
+        MediaKey::from_code(buf[6])
+    }
+}
+
 /// Encode `samples` (interleaved f32, -1.0..=1.0) into `dst` in the wire format.
 pub fn encode_samples(format: WireFormat, samples: &[f32], dst: &mut Vec<u8>) {
     match format {
@@ -326,6 +408,66 @@ mod tests {
         assert_eq!(parsed.kind, PT_HELLO);
         assert_eq!(parsed.audio_port, 47_772);
         assert_eq!(parsed.name, "studio-pc");
+    }
+
+    #[test]
+    fn media_keys_round_trip() {
+        for key in MediaKey::ALL {
+            let packet = key.encode_packet();
+            assert_eq!(packet.len(), MEDIA_PACKET);
+            assert_eq!(MediaKey::parse_packet(&packet), Some(key), "{key:?}");
+        }
+    }
+
+    /// The two kinds of control datagram share a port, so neither may ever be
+    /// mistaken for the other.
+    #[test]
+    fn media_keys_and_beacons_do_not_overlap() {
+        for kind in [PT_HELLO, PT_SENDER, PT_BYE] {
+            let beacon = Beacon {
+                kind,
+                audio_port: 47_772,
+                sample_rate: 48_000,
+                channels: 2,
+                name: "studio-pc".to_string(),
+            };
+            assert!(
+                MediaKey::parse_packet(&beacon.encode()).is_none(),
+                "a {kind} beacon parsed as a media key"
+            );
+        }
+        assert!(Beacon::parse(&MediaKey::PlayPause.encode_packet()).is_none());
+    }
+
+    /// Nothing but a well-formed media packet may press a key on the far end.
+    #[test]
+    fn rejects_malformed_media_keys() {
+        assert!(MediaKey::parse_packet(&[]).is_none());
+        assert!(
+            MediaKey::parse_packet(&[0u8; MEDIA_PACKET]).is_none(),
+            "bad magic"
+        );
+
+        let good = MediaKey::Next.encode_packet();
+        assert!(
+            MediaKey::parse_packet(&good[..MEDIA_PACKET - 1]).is_none(),
+            "truncated"
+        );
+
+        let mut padded = good.to_vec();
+        padded.push(0);
+        assert!(MediaKey::parse_packet(&padded).is_none(), "padded");
+
+        let mut unknown_key = good;
+        unknown_key[6] = 99;
+        assert!(
+            MediaKey::parse_packet(&unknown_key).is_none(),
+            "unknown key"
+        );
+
+        let mut wrong_type = good;
+        wrong_type[5] = PT_AUDIO;
+        assert!(MediaKey::parse_packet(&wrong_type).is_none(), "wrong type");
     }
 
     /// An over-long hostname must be truncated rather than corrupting the frame.

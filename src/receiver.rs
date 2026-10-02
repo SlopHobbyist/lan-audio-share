@@ -8,6 +8,7 @@
 
 use crate::config::Config;
 use crate::devices::{self, Direction};
+use crate::media;
 use crate::net::{self, NetThreads};
 use crate::protocol::{AudioHeader, MAX_PACKET, decode_samples};
 use crate::resample::{DriftController, DriftResampler};
@@ -40,6 +41,9 @@ pub struct RecvRole {
     stream: cpal::Stream,
     _beacon: NetThreads,
     _rx: NetThreads,
+    /// Holds the grab on this machine's media keys for as long as we are
+    /// listening. Absent when the feature is off, or when the OS refused.
+    _media: Option<media::Capture>,
     pub device_name: String,
     pub rate: u32,
     pub device_channels: u16,
@@ -219,6 +223,9 @@ pub fn start(config: &Config, stats: Arc<Stats>) -> Result<RecvRole> {
     let beacon_socket = socket
         .try_clone()
         .context("could not share the audio socket")?;
+    let media_socket = socket
+        .try_clone()
+        .context("could not share the audio socket")?;
     let rx = spawn_receive_thread(socket, producer, stats.clone())?;
     let beacon = net::spawn_receiver_beacon(
         stats.clone(),
@@ -226,6 +233,7 @@ pub fn start(config: &Config, stats: Arc<Stats>) -> Result<RecvRole> {
         config.sample_rate,
         config.channels() as u8,
     )?;
+    let media = start_media_keys(config, &stats, media_socket);
 
     let playback = Playback::new(consumer, stats.clone(), config.jitter_ms as f64, rate);
 
@@ -268,10 +276,41 @@ pub fn start(config: &Config, stats: Arc<Stats>) -> Result<RecvRole> {
         stream,
         _beacon: beacon,
         _rx: rx,
+        _media: media,
         rate,
         device_channels,
         audio_port,
     })
+}
+
+/// Start forwarding this machine's media keys, if the user asked for it.
+///
+/// Never fatal: failing to get the keys is worth saying out loud, but audio is
+/// what the app is for and it carries on regardless.
+fn start_media_keys(
+    config: &Config,
+    stats: &Arc<Stats>,
+    socket: std::net::UdpSocket,
+) -> Option<media::Capture> {
+    if !config.media_keys {
+        return None;
+    }
+    match media::forward(stats.clone(), socket) {
+        Ok(capture) => {
+            if !capture.refused().is_empty() {
+                stats.set_media_note(format!(
+                    "another program already owns the {} key on this machine, so \
+                     it will not be forwarded",
+                    capture.refused().join(" and the ")
+                ));
+            }
+            Some(capture)
+        }
+        Err(err) => {
+            stats.set_media_note(err.to_string());
+            None
+        }
+    }
 }
 
 /// Pull packets off the socket, conceal gaps, and feed the jitter buffer.
@@ -315,6 +354,9 @@ fn spawn_receive_thread(
                     .source_channels
                     .store(header.channels as u32, Ordering::Relaxed);
                 stats.resync.store(true, Ordering::Relaxed);
+                // Also how a media key finds its way back to the sender when
+                // its announcements are not reaching us but its audio is.
+                stats.note_audio_source(from.ip());
                 if let Ok(mut guard) = stats.remote_name.lock()
                     && guard.is_empty()
                 {

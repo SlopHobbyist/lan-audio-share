@@ -9,6 +9,7 @@
 mod config;
 mod devices;
 mod engine;
+mod media;
 mod net;
 mod protocol;
 mod receiver;

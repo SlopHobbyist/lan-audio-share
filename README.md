@@ -24,6 +24,12 @@ Allow the Local Network and Microphone prompts on first launch. Without them the
 
 Use along with [Loopback](https://rogueamoeba.com/loopback/) or [Virtual Audio Cable](https://vac.muzychenko.net/en/download.htm) to share desktop audio.
 
+## Media Keys
+
+Optional, off by default. Tick **Forward media keys** under *Advanced* on both machines and your play/pause, next, previous and stop keys control the computer the audio is coming from instead of the one you're sitting at.
+
+Volume keys are left alone — those stay local. On macOS, capturing the keys needs Accessibility permission (System Settings > Privacy & Security > Accessibility).
+
 Inspired by [SonoBus](https://github.com/sonosaurus/sonobus), but doesn't need a central server.
 
 I made the icons myself in Adobe Illustrator.

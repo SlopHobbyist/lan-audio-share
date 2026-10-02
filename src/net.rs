@@ -23,14 +23,15 @@
 //! that exemption stays open for as long as the receiver is running.
 
 use crate::config::Config;
+use crate::media;
 use crate::protocol::{
-    BEACON_INTERVAL_MS, Beacon, DISCOVERY_PORT, MCAST_GROUP, PEER_TIMEOUT_MS, PT_BYE, PT_HELLO,
-    PT_SENDER, local_name,
+    BEACON_INTERVAL_MS, Beacon, DISCOVERY_PORT, MCAST_GROUP, MediaKey, PEER_TIMEOUT_MS, PT_BYE,
+    PT_HELLO, PT_SENDER, local_name,
 };
 use crate::stats::{Peer, Stats};
 use anyhow::{Context, Result};
 use socket2::{Domain, Protocol, SockRef, Socket, Type};
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -53,6 +54,11 @@ fn mcast_addr() -> SocketAddrV4 {
 /// How often the interface list is re-read, so a cable plugged in or a Wi-Fi
 /// network joined after launch starts carrying beacons without a restart.
 const INTERFACE_REFRESH: Duration = Duration::from_secs(5);
+
+/// Shortest gap between two media keys this machine will act on. A person
+/// pressing a key is nowhere near this fast; a misbehaving or malicious sender
+/// would be, and synthesising keypresses in a tight loop is worth refusing.
+const MEDIA_MIN_GAP: Duration = Duration::from_millis(50);
 
 /// A peer heard at a new address under a name and port we already know is taken
 /// to be the same machine on another interface, unless the old address has gone
@@ -265,6 +271,7 @@ pub fn spawn_sender_discovery(
     let name = local_name();
     let rate = config.sample_rate;
     let channels = config.channels() as u8;
+    let media_keys = config.media_keys;
 
     let handle = std::thread::Builder::new()
         .name("discovery-send".into())
@@ -279,6 +286,7 @@ pub fn spawn_sender_discovery(
             let timeout = Duration::from_millis(PEER_TIMEOUT_MS);
             let mut announcer = Announcer::new();
             let mut last_announce = Instant::now() - Duration::from_secs(1);
+            let mut last_media = None;
             let mut buf = [0u8; 512];
 
             // Seed the manual peers so audio flows even with no discovery at all.
@@ -311,6 +319,17 @@ pub fn spawn_sender_discovery(
                 let Ok((len, from)) = socket.recv_from(&mut buf) else {
                     continue;
                 };
+
+                // A listener asking this machine to press a media key. Shares
+                // the discovery port because that is the one port a receiver
+                // already knows how to reach us on.
+                if let Some(key) = MediaKey::parse_packet(&buf[..len]) {
+                    if media_keys {
+                        press_media_key(&stats, from, key, &mut last_media);
+                    }
+                    continue;
+                }
+
                 let Some(beacon) = Beacon::parse(&buf[..len]) else {
                     continue;
                 };
@@ -338,6 +357,49 @@ pub fn spawn_sender_discovery(
         .context("could not start discovery thread")?;
     threads.push(handle);
     Ok(threads)
+}
+
+/// True when `ip` is one of this machine's own.
+///
+/// Two instances on one computer, one sending and one receiving, would otherwise
+/// bounce a single keypress between them forever: the receiver claims the key,
+/// the sender synthesises it, and the receiver claims that too. Nobody means to
+/// press a key on the machine they are already sitting at, so this is only ever
+/// a loop.
+fn is_own_address(ip: IpAddr) -> bool {
+    if ip.is_loopback() {
+        return true;
+    }
+    matches!(ip, IpAddr::V4(v4) if lan_interfaces().iter().any(|i| i.ip == v4))
+}
+
+/// Whether a media key arriving from `from` should be acted on.
+///
+/// Only a listener this machine is actually streaming to may press keys here.
+/// The LAN is trusted as far as audio goes, but pressing keys is a step further,
+/// so a datagram from anywhere else is dropped rather than obeyed — and a flood
+/// of them is refused outright, since nobody presses a key twenty times a second.
+fn media_command_allowed(peers: &[Peer], from: SocketAddr, last: Option<Instant>) -> bool {
+    if is_own_address(from.ip()) {
+        return false;
+    }
+    if !peers.iter().any(|p| p.addr.ip() == from.ip()) {
+        return false;
+    }
+    last.is_none_or(|t| t.elapsed() >= MEDIA_MIN_GAP)
+}
+
+/// Act on a media key a listener asked us to press.
+fn press_media_key(stats: &Stats, from: SocketAddr, key: MediaKey, last: &mut Option<Instant>) {
+    if !media_command_allowed(&stats.live_peers(), from, *last) {
+        return;
+    }
+    *last = Some(Instant::now());
+
+    match media::press(key) {
+        Ok(()) => stats.note_media_key(key),
+        Err(err) => stats.set_media_note(format!("could not press {}: {err}", key.label())),
+    }
 }
 
 fn note_peer(stats: &Stats, addr: SocketAddr, name: &str) {
@@ -458,7 +520,7 @@ pub fn spawn_receiver_beacon(
                 // broadcasts do not reach it but its broadcasts do reach us.
                 let _ = audio.send_to(&hello.encode(), from);
 
-                stats.note_remote(&beacon.name);
+                stats.note_remote(&beacon.name, from);
             }
 
             // Tell any sender we are going away so it stops immediately rather
@@ -544,6 +606,75 @@ mod tests {
             peers.iter().any(|p| p.addr.port() == listen_port),
             "peer table did not record the receiver"
         );
+    }
+
+    fn peer(ip: [u8; 4]) -> Peer {
+        Peer {
+            addr: SocketAddr::from((ip, 47_772)),
+            name: "listener".to_string(),
+            last_seen: Instant::now(),
+            manual: false,
+        }
+    }
+
+    /// A listener we are streaming to may press keys here; nothing else may.
+    #[test]
+    fn only_a_live_listener_may_press_keys() {
+        let peers = vec![peer([192, 168, 1, 20])];
+
+        assert!(media_command_allowed(
+            &peers,
+            SocketAddr::from(([192, 168, 1, 20], 47_772)),
+            None
+        ));
+        // Same machine, a different source port: still that listener.
+        assert!(media_command_allowed(
+            &peers,
+            SocketAddr::from(([192, 168, 1, 20], 51_000)),
+            None
+        ));
+        assert!(
+            !media_command_allowed(&peers, SocketAddr::from(([192, 168, 1, 99], 47_772)), None),
+            "a machine we are not streaming to pressed a key"
+        );
+        assert!(
+            !media_command_allowed(&[], SocketAddr::from(([192, 168, 1, 20], 47_772)), None),
+            "a key was accepted with no listeners at all"
+        );
+    }
+
+    /// A press this machine made itself must not come back round again.
+    #[test]
+    fn refuses_keys_from_this_machine() {
+        let loopback = SocketAddr::from(([127, 0, 0, 1], 47_772));
+        let peers = vec![peer([127, 0, 0, 1])];
+        assert!(
+            !media_command_allowed(&peers, loopback, None),
+            "a keypress from this machine would loop forever"
+        );
+
+        for iface in lan_interfaces() {
+            let own = SocketAddr::from((iface.ip, 47_772));
+            let peers = vec![peer(iface.ip.octets())];
+            assert!(
+                !media_command_allowed(&peers, own, None),
+                "{} is this machine, so a key from it would loop",
+                iface.ip
+            );
+        }
+    }
+
+    /// A flood has to be refused, since each one synthesises a real keypress.
+    #[test]
+    fn rate_limits_media_keys() {
+        let peers = vec![peer([192, 168, 1, 20])];
+        let from = SocketAddr::from(([192, 168, 1, 20], 47_772));
+        assert!(!media_command_allowed(&peers, from, Some(Instant::now())));
+        assert!(media_command_allowed(
+            &peers,
+            from,
+            Some(Instant::now() - MEDIA_MIN_GAP * 2)
+        ));
     }
 
     /// Every interface must get a broadcast address inside its own subnet,
