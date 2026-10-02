@@ -218,6 +218,7 @@ pub const MEDIA_PACKET: usize = 7;
 
 impl MediaKey {
     /// Every key that gets forwarded, which is also the set a capture grabs.
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub const ALL: [MediaKey; 4] = [
         MediaKey::PlayPause,
         MediaKey::Next,

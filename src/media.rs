@@ -77,6 +77,16 @@ pub fn press(key: MediaKey) -> Result<()> {
     imp::press(key)
 }
 
+/// Check that this machine will let us press keys, asking the OS for permission
+/// if it has not been given yet.
+///
+/// Run when the feature is switched on, so any prompt appears while someone is
+/// at this machine's screen, rather than on the first press, which comes from
+/// across the room.
+pub fn prepare_press() -> Result<()> {
+    imp::prepare_press()
+}
+
 /// Claim this machine's media keys and send each press to whichever machine we
 /// are playing audio from.
 ///

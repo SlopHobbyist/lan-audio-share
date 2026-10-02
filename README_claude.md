@@ -71,9 +71,11 @@ Per-platform notes:
 - **Windows** claims the keys with `RegisterHotKey`, which hands them over
   exclusively. If another program got there first, the status area says which key
   it could not get, and the rest still work.
-- **macOS** needs Accessibility to *capture* — System Settings → Privacy &
-  Security → Accessibility — because the event tap also swallows the press.
-  Pressing needs no permission. There is no system-defined stop key on macOS, so
+- **macOS** needs Accessibility at both ends — System Settings → Privacy &
+  Security → Accessibility. Capturing needs it because the event tap also
+  swallows the press, and pressing needs it because macOS silently drops
+  synthetic key events from apps without it. The app asks when the feature is
+  switched on. There is no system-defined stop key on macOS, so
   stop is the one key that cannot be forwarded to a Mac; next and previous arrive
   as the fast-forward and rewind keys, which is what the keys on an Apple
   keyboard send.

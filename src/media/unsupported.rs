@@ -18,6 +18,10 @@ pub fn press(_key: MediaKey) -> Result<()> {
     Err(unsupported())
 }
 
+pub fn prepare_press() -> Result<()> {
+    Err(unsupported())
+}
+
 pub fn capture(
     _on_key: impl FnMut(MediaKey) + Send + 'static,
 ) -> Result<(NetThreads, Vec<&'static str>)> {

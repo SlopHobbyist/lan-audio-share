@@ -6,13 +6,14 @@
 //! half of this can use the normal keyboard APIs: there is no virtual key code
 //! for play/pause to send.
 //!
-//! Capturing needs permission. The tap is an active one so that it can swallow
-//! the press — one key should not pause this machine as well as the far one —
-//! and an active tap is Accessibility-gated. `CGEventTapCreate` simply returns
-//! null when that has not been granted, so the error path says where to grant it.
-//!
-//! Pressing needs no permission: posting to the HID tap is how every media
-//! remote on the platform does it.
+//! Both halves need Accessibility. The tap is an active one so that it can
+//! swallow the press — one key should not pause this machine as well as the far
+//! one — and an active tap is Accessibility-gated: `CGEventTapCreate` simply
+//! returns null without it. Posting a synthetic event is gated the same way,
+//! and fails worse: `CGEventPost` drops the event without a word. The
+//! post-event request is used for both because it is the one that prompts for
+//! the Accessibility pane; the listen-event request asks for Input Monitoring,
+//! which an active tap does not accept.
 
 use crate::net::{self, NetThreads};
 use crate::protocol::MediaKey;
@@ -23,7 +24,7 @@ use objc2_core_foundation::{
 };
 use objc2_core_graphics::{
     CGEvent, CGEventMask, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
-    CGEventTapProxy, CGEventType, CGPreflightListenEventAccess, CGRequestListenEventAccess,
+    CGEventTapProxy, CGEventType, CGPreflightPostEventAccess, CGRequestPostEventAccess,
 };
 use std::ffi::c_void;
 use std::ptr::NonNull;
@@ -41,15 +42,15 @@ const NX_SYSDEFINED: u32 = 14;
 const SUBTYPE_AUX_KEY: i16 = 8;
 
 /// `NX_KEYTYPE_*` codes, as packed into the high half of `data1`.
-const NX_KEYTYPE_PLAY: i64 = 16;
-const NX_KEYTYPE_NEXT: i64 = 17;
-const NX_KEYTYPE_PREVIOUS: i64 = 18;
-const NX_KEYTYPE_FAST: i64 = 19;
-const NX_KEYTYPE_REWIND: i64 = 20;
+const NX_KEYTYPE_PLAY: isize = 16;
+const NX_KEYTYPE_NEXT: isize = 17;
+const NX_KEYTYPE_PREVIOUS: isize = 18;
+const NX_KEYTYPE_FAST: isize = 19;
+const NX_KEYTYPE_REWIND: isize = 20;
 
 /// Key state, as packed into the second byte of `data1`.
-const KEY_DOWN: i64 = 0xA;
-const KEY_UP: i64 = 0xB;
+const KEY_DOWN: isize = 0xA;
+const KEY_UP: isize = 0xB;
 
 /// How long the tap thread waits in its run loop before re-checking the stop
 /// flag.
@@ -60,7 +61,7 @@ const RUN_SLICE: f64 = 0.25;
 /// Next and previous go out as fast-forward and rewind because that is what the
 /// keys on an Apple keyboard emit, and emitting what the hardware emits is the
 /// whole promise of this feature. There is no system-defined stop key.
-fn send_code(key: MediaKey) -> Option<i64> {
+fn send_code(key: MediaKey) -> Option<isize> {
     match key {
         MediaKey::PlayPause => Some(NX_KEYTYPE_PLAY),
         MediaKey::Next => Some(NX_KEYTYPE_FAST),
@@ -72,7 +73,7 @@ fn send_code(key: MediaKey) -> Option<i64> {
 /// The key a received code means. Both spellings of next and previous are
 /// accepted, since third-party keyboards with dedicated track buttons send the
 /// `NEXT`/`PREVIOUS` pair rather than the Apple `FAST`/`REWIND` pair.
-fn received_key(code: i64) -> Option<MediaKey> {
+fn received_key(code: isize) -> Option<MediaKey> {
     match code {
         NX_KEYTYPE_PLAY => Some(MediaKey::PlayPause),
         NX_KEYTYPE_FAST | NX_KEYTYPE_NEXT => Some(MediaKey::Next),
@@ -81,7 +82,7 @@ fn received_key(code: i64) -> Option<MediaKey> {
     }
 }
 
-fn post(code: i64, state: i64) -> Result<()> {
+fn post(code: isize, state: isize) -> Result<()> {
     let event = NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2(
         NSEventType::SystemDefined,
         // `NSPoint` is CoreGraphics' `CGPoint` under another name.
@@ -105,6 +106,26 @@ fn post(code: i64, state: i64) -> Result<()> {
     Ok(())
 }
 
+/// Where to grant the permission, said once so both halves say it the same way.
+const ACCESSIBILITY_HINT: &str = "Allow LAN Audio Share under System Settings > Privacy & \
+     Security > Accessibility, then switch this back on.";
+
+/// Ask for Accessibility if we do not have it. Asking is what produces the
+/// system prompt; without it the user only ever sees the failure.
+fn ensure_accessibility() -> bool {
+    CGPreflightPostEventAccess() || CGRequestPostEventAccess()
+}
+
+pub fn prepare_press() -> Result<()> {
+    if ensure_accessibility() {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "macOS will not let media keys from the listener be pressed here. {ACCESSIBILITY_HINT}"
+        ))
+    }
+}
+
 pub fn press(key: MediaKey) -> Result<()> {
     let code = send_code(key).ok_or_else(|| {
         anyhow!(
@@ -112,6 +133,13 @@ pub fn press(key: MediaKey) -> Result<()> {
             key.label()
         )
     })?;
+    // Posting without permission is silently ignored, which would read as
+    // success here and as nothing happening on the other machine.
+    if !CGPreflightPostEventAccess() {
+        return Err(anyhow!(
+            "Accessibility has not been granted. {ACCESSIBILITY_HINT}"
+        ));
+    }
     post(code, KEY_DOWN)?;
     post(code, KEY_UP)
 }
@@ -201,11 +229,7 @@ pub fn capture(
 
 /// Build the tap, then pump its run loop until asked to stop.
 fn run_tap(stop: &AtomicBool, state: *mut TapState, tx: &mpsc::Sender<Result<(), String>>) {
-    // Asking first is what produces the system prompt; without it the user only
-    // ever sees the failure.
-    if !CGPreflightListenEventAccess() {
-        CGRequestListenEventAccess();
-    }
+    ensure_accessibility();
 
     // SAFETY: the callback matches the required signature, and `state` is a
     // live, uniquely-owned `TapState` for as long as this function runs.
@@ -220,10 +244,9 @@ fn run_tap(stop: &AtomicBool, state: *mut TapState, tx: &mpsc::Sender<Result<(),
         )
     };
     let Some(port) = port else {
-        let _ = tx.send(Err("macOS would not allow the media keys to be captured. \
-             Allow LAN Audio Share under System Settings > Privacy & Security > \
-             Accessibility, then switch this back on."
-            .to_string()));
+        let _ = tx.send(Err(format!(
+            "macOS would not allow the media keys to be captured. {ACCESSIBILITY_HINT}"
+        )));
         return;
     };
 

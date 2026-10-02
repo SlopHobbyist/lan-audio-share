@@ -72,6 +72,11 @@ fn keyboard_input(vk: VIRTUAL_KEY, release: bool) -> INPUT {
     }
 }
 
+/// `SendInput` needs no permission.
+pub fn prepare_press() -> Result<()> {
+    Ok(())
+}
+
 pub fn press(key: MediaKey) -> Result<()> {
     let vk = virtual_key(key);
     let events = [keyboard_input(vk, false), keyboard_input(vk, true)];

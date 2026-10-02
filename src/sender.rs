@@ -8,6 +8,7 @@
 
 use crate::config::Config;
 use crate::devices::{self, Direction};
+use crate::media;
 use crate::net::{self, NetThreads, PeerTargets};
 use crate::protocol::{AUDIO_HEADER, AudioHeader, WIRE_FRAMES, WireFormat, encode_samples};
 use crate::stats::Stats;
@@ -174,6 +175,12 @@ pub fn start(config: &Config, stats: Arc<Stats>) -> Result<SendRole> {
     let socket = net::sender_socket()?;
     let targets = net::new_peer_targets();
     let discovery = net::spawn_sender_discovery(stats.clone(), targets.clone(), config.clone())?;
+    // Never fatal: the keys not working is worth saying, but audio carries on.
+    if config.media_keys
+        && let Err(err) = media::prepare_press()
+    {
+        stats.set_media_note(err.to_string());
+    }
     let packetizer = Packetizer::new(config.format, rate, session_id());
 
     let stream = match sample_format {
