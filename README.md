@@ -22,7 +22,7 @@ Builds universal (Apple Silicon + Intel) by default. Add `--native` for a quicke
 
 Allow the Local Network and Microphone prompts on first launch. Without them the app can't find peers or capture audio.
 
-Use along with [Loopback](https://rogueamoeba.com/loopback/) or [Virtual Audio Cable](https://vac.muzychenko.net/en/download.htm) to share desktop audio.
+Use along with [BlackHole](https://github.com/existentialaudio/blackhole), [Loopback](https://rogueamoeba.com/loopback/), or [Virtual Audio Cable](https://vac.muzychenko.net/en/download.htm) to share desktop audio.
 
 ## Media Keys
 

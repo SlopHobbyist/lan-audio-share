@@ -168,11 +168,29 @@ cat > "${CONTENTS}/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# Ad-hoc signature. This is not about trust — it gives the app a stable identity
-# so macOS remembers the permissions you grant it instead of re-prompting (or
-# silently denying) after every rebuild.
-echo "--> Signing (ad-hoc)"
-codesign --force --sign - --identifier "$BUNDLE_ID" "$APP"
+# macOS remembers granted permissions (Accessibility, Microphone, Local Network)
+# against the signature's designated requirement. An ad-hoc signature's
+# requirement is the hash of this exact binary, so every rebuild looks like a new
+# app and users have to grant everything again after updating. A certificate
+# makes it "this bundle id, signed by this certificate", which survives updates.
+#
+# The certificate is self-signed, so it is not about trust — Gatekeeper treats
+# the download the same either way. It has to be the *same* certificate for
+# every release, or updating loses the permissions again. Set SIGN_IDENTITY to
+# use another one, or to "-" to force ad-hoc.
+SIGN_IDENTITY="${SIGN_IDENTITY:-LAN Audio Share Code Signing}"
+if [[ "$SIGN_IDENTITY" != "-" ]] \
+  && ! security find-identity -p codesigning | grep -qF "\"$SIGN_IDENTITY\""; then
+  echo "warning: no \"$SIGN_IDENTITY\" certificate in the keychain; signing ad-hoc." >&2
+  echo "         Users updating to this build will have to grant permissions again." >&2
+  SIGN_IDENTITY="-"
+fi
+if [[ "$SIGN_IDENTITY" == "-" ]]; then
+  echo "--> Signing (ad-hoc)"
+else
+  echo "--> Signing (${SIGN_IDENTITY})"
+fi
+codesign --force --sign "$SIGN_IDENTITY" --identifier "$BUNDLE_ID" "$APP"
 
 # Only matters if the bundle was downloaded rather than built here, but harmless.
 xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
